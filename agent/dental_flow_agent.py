@@ -112,6 +112,11 @@ class EHRClient:
         r.raise_for_status()
         return r.json()
 
+    def get_agent_actions(self) -> list:
+        r = self.session.get(f"{self.base_url}/agent/actions", timeout=10)
+        r.raise_for_status()
+        return r.json().get("actions", [])
+
 # ── Agent Logic ───────────────────────────────────────────────────────────────
 
 class DentalFlowAgent:
