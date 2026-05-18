@@ -1,0 +1,59 @@
+# DentalFlow Agent - Docker Compose
+# One command to spin up the full demo stack:
+#   docker-compose up
+#
+# Services:
+#   ehr-api     - Mock EHR REST API (Node.js/Express) on port 3001
+#   agent-api   - DentalFlow Agent HTTP API (Flask/Gunicorn) on port 8080
+#
+# UiPath Maestro connects to agent-api:8080 via HTTP Activity
+
+version: '3.9'
+
+services:
+
+  # ── Mock EHR API ──────────────────────────────────────────────────
+  ehr-api:
+    build:
+      context: ./ehr-api
+      dockerfile: Dockerfile
+    container_name: dentalflow-ehr-api
+    ports:
+      - "3001:3001"
+    environment:
+      PORT: 3001
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/health', r => process.exit(r.statusCode === 200 ? 0 : 1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── DentalFlow Agent API ────────────────────────────────────────────
+  agent-api:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    container_name: dentalflow-agent-api
+    ports:
+      - "8080:8080"
+    environment:
+      EHR_BASE_URL: http://ehr-api:3001
+      AGENT_API_PORT: 8080
+      FLASK_DEBUG: false
+    depends_on:
+      ehr-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+# ── Networks ────────────────────────────────────────────────────────────
+networks:
+  default:
+    name: dentalflow-network
