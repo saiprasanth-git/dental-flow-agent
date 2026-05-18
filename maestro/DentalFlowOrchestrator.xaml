@@ -1,0 +1,228 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DentalFlow Orchestrator - UiPath Maestro Case Workflow
+  ======================================================
+  Track 1: UiPath Maestro Case
+  UiPath AgentHack 2026
+
+  This workflow orchestrates the DentalFlow AI Agent using UiPath Maestro.
+  It implements a full exception-handling loop with human-in-the-loop approval
+  for escalated cases.
+
+  Flow:
+    1. Health Check      - Verify agent API is reachable
+    2. Fetch Exceptions  - Get appointments needing attention
+    3. Run Agent         - Trigger the AI agent via HTTP Activity
+    4. Evaluate Result   - Check if human review is needed
+    5. Human Task        - If escalated, send to Maestro Action Center
+    6. Approve/Cancel    - Human decision triggers agent resolution
+    7. Log & Report      - Write summary to Orchestrator queue
+
+  Prerequisites:
+    - Agent API running at AGENT_API_URL (see .env.example)
+    - UiPath Orchestrator connected to Automation Cloud
+    - Maestro Action Center enabled
+-->
+<Activity
+  x:Class="DentalFlow.Maestro.DentalFlowOrchestrator"
+  xmlns="http://schemas.uipath.com/workflow/activities"
+  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+  xmlns:ui="http://schemas.uipath.com/workflow/activities"
+  xmlns:sap="http://schemas.microsoft.com/netfx/2009/xaml/activities/presentation"
+  xmlns:scg="clr-namespace:System.Collections.Generic;assembly=mscorlib"
+  xmlns:s="clr-namespace:System;assembly=mscorlib"
+  sap:VirtualizedContainerService.HintSize="600,800"
+  mva:VisualBasic.Settings="Assembly references and imported namespaces serialized as XML element"
+  xmlns:mva="clr-namespace:Microsoft.VisualBasic.Activities;assembly=System.Activities">
+
+  <x:Members>
+    <!-- Input arguments -->
+    <x:Property Name="AgentApiUrl" Type="InArgument(x:String)" />
+    <x:Property Name="MaxRetries" Type="InArgument(x:Int32)" />
+    <!-- Output arguments -->
+    <x:Property Name="RunStatus" Type="OutArgument(x:String)" />
+    <x:Property Name="ResolvedCount" Type="OutArgument(x:Int32)" />
+    <x:Property Name="EscalatedCount" Type="OutArgument(x:Int32)" />
+  </x:Members>
+
+  <Sequence DisplayName="DentalFlow Orchestrator - Main">
+
+    <!-- ═══ STEP 1: Health Check ═══════════════════════════════════════════════ -->
+    <ui:HttpClientActivity
+      DisplayName="[1] Health Check - Verify Agent API"
+      Endpoint="{x:Null}"
+      Url="[AgentApiUrl + &quot;/health&quot;]"
+      Method="GET"
+      AcceptFormat="application/json"
+      Result="{x:Null}"
+      StatusCode="{x:Null}"
+      ResponseContent="{x:Null}">
+      <!-- Store response for conditional check -->
+      <ui:HttpClientActivity.Result>
+        <OutArgument x:TypeArguments="x:String" />
+      </ui:HttpClientActivity.Result>
+      <ui:HttpClientActivity.StatusCode>
+        <OutArgument x:TypeArguments="x:Int32" />
+      </ui:HttpClientActivity.StatusCode>
+    </ui:HttpClientActivity>
+
+    <!-- If health check fails, throw and exit -->
+    <ui:If DisplayName="[1b] Check Health Response">
+      <ui:If.Condition>healthStatusCode = 200</ui:If.Condition>
+      <ui:If.Then>
+        <ui:LogMessage DisplayName="Agent API healthy" Level="Info"
+          Message="[&quot;DentalFlow Agent API is healthy at &quot; + AgentApiUrl]" />
+      </ui:If.Then>
+      <ui:If.Else>
+        <Throw DisplayName="Agent API unreachable"
+          Exception="[New Exception(&quot;DentalFlow Agent API is not reachable. Status: &quot; + healthStatusCode.ToString())]" />
+      </ui:If.Else>
+    </ui:If>
+
+    <!-- ═══ STEP 2: Fetch Exceptions ════════════════════════════════════════════ -->
+    <ui:HttpClientActivity
+      DisplayName="[2] Fetch Exceptions from EHR"
+      Url="[AgentApiUrl + &quot;/exceptions&quot;]"
+      Method="GET"
+      AcceptFormat="application/json">
+      <ui:HttpClientActivity.Result>
+        <OutArgument x:TypeArguments="x:String" />
+      </ui:HttpClientActivity.Result>
+    </ui:HttpClientActivity>
+
+    <ui:LogMessage DisplayName="Log Exception Count" Level="Info"
+      Message="[&quot;Exceptions API response: &quot; + exceptionsResponse]" />
+
+    <!-- ═══ STEP 3: Run AI Agent ═════════════════════════════════════════════════ -->
+    <ui:HttpClientActivity
+      DisplayName="[3] Trigger Agent - POST /run"
+      Url="[AgentApiUrl + &quot;/run&quot;]"
+      Method="POST"
+      ContentType="application/json"
+      Body="{}"
+      AcceptFormat="application/json">
+      <ui:HttpClientActivity.Result>
+        <OutArgument x:TypeArguments="x:String" />
+      </ui:HttpClientActivity.Result>
+      <ui:HttpClientActivity.StatusCode>
+        <OutArgument x:TypeArguments="x:Int32" />
+      </ui:HttpClientActivity.StatusCode>
+    </ui:HttpClientActivity>
+
+    <ui:LogMessage DisplayName="Log Agent Run Response" Level="Info"
+      Message="[&quot;Agent run response: &quot; + agentRunResponse]" />
+
+    <!-- ═══ STEP 4: Deserialize + Evaluate Result ════════════════════════════════ -->
+    <ui:DeserializeJSON
+      DisplayName="[4] Parse Agent Run Response"
+      JsonString="[agentRunResponse]" />
+
+    <!-- Assign output arguments -->
+    <Assign DisplayName="Set RunStatus">
+      <Assign.To><OutArgument x:TypeArguments="x:String" />[RunStatus]</Assign.To>
+      <Assign.Value>[agentResult("status").ToString()]</Assign.Value>
+    </Assign>
+    <Assign DisplayName="Set ResolvedCount">
+      <Assign.To><OutArgument x:TypeArguments="x:Int32" />[ResolvedCount]</Assign.To>
+      <Assign.Value>[CInt(agentResult("summary")("resolved"))]</Assign.Value>
+    </Assign>
+    <Assign DisplayName="Set EscalatedCount">
+      <Assign.To><OutArgument x:TypeArguments="x:Int32" />[EscalatedCount]</Assign.To>
+      <Assign.Value>[CInt(agentResult("summary")("escalated"))]</Assign.Value>
+    </Assign>
+
+    <!-- ═══ STEP 5: Human-in-the-Loop (Escalation) ══════════════════════════════ -->
+    <ui:If DisplayName="[5] Requires Human Review?">
+      <ui:If.Condition>[CBool(agentResult("requiresHumanReview"))]</ui:If.Condition>
+      <ui:If.Then>
+        <Sequence DisplayName="Escalation - Create Human Task">
+
+          <ui:LogMessage DisplayName="Log Escalation" Level="Warn"
+            Message="[&quot;[ESCALATION] &quot; + EscalatedCount.ToString() + &quot; appointment(s) require human review&quot;]" />
+
+          <!-- Create a Maestro Action Center task for each escalation -->
+          <ui:ForEach DisplayName="[5a] Create Task Per Escalation"
+            Values="[agentResult(&quot;escalations&quot;)]">
+            <ui:ForEach.Body>
+              <ActivityAction x:TypeArguments="x:Object">
+                <ActivityAction.Argument>
+                  <DelegateInArgument x:TypeArguments="x:Object" Name="escalation" />
+                </ActivityAction.Argument>
+                <Sequence>
+                  <!-- Create Action Center Task -->
+                  <ui:CreateFormTask
+                    DisplayName="Create Human Review Task"
+                    Title="[&quot;Review Required: &quot; + escalation(&quot;patientName&quot;).ToString()]"
+                    Priority="High"
+                    AssignedUser="dental-admin@practice.com"
+                    FormData="[New Dictionary(Of String, Object) From {
+                      {&quot;appointmentId&quot;, escalation(&quot;id&quot;).ToString()},
+                      {&quot;patientName&quot;, escalation(&quot;patientName&quot;).ToString()},
+                      {&quot;appointmentType&quot;, escalation(&quot;type&quot;).ToString()},
+                      {&quot;scheduledAt&quot;, escalation(&quot;scheduledAt&quot;).ToString()},
+                      {&quot;exceptionType&quot;, escalation(&quot;exceptionType&quot;).ToString()},
+                      {&quot;suggestedAction&quot;, escalation(&quot;suggestedAction&quot;).ToString()},
+                      {&quot;priority&quot;, escalation(&quot;priority&quot;).ToString()}
+                    }]">
+                    <ui:CreateFormTask.TaskId>
+                      <OutArgument x:TypeArguments="x:String" />
+                    </ui:CreateFormTask.TaskId>
+                  </ui:CreateFormTask>
+
+                  <!-- Wait for human decision -->
+                  <ui:WaitForFormTask
+                    DisplayName="Wait for Human Decision"
+                    TaskId="[taskId]"
+                    TimeoutInMinutes="1440">
+                    <!-- 24h timeout -->
+                    <ui:WaitForFormTask.TaskAction>
+                      <OutArgument x:TypeArguments="x:String" />
+                    </ui:WaitForFormTask.TaskAction>
+                    <ui:WaitForFormTask.FormData>
+                      <OutArgument x:TypeArguments="scg:Dictionary(x:String, x:Object)" />
+                    </ui:WaitForFormTask.FormData>
+                  </ui:WaitForFormTask>
+
+                  <!-- Post human decision back to agent API -->
+                  <ui:HttpClientActivity
+                    DisplayName="[5b] Apply Human Decision"
+                    Url="[AgentApiUrl + &quot;/escalate/approve&quot;]"
+                    Method="POST"
+                    ContentType="application/json"
+                    Body="[&quot;{&quot;&quot;appointmentId&quot;&quot;:&quot;&quot;&quot; + escalation(&quot;id&quot;).ToString() + &quot;&quot;&quot;,&quot;&quot;approvedBy&quot;&quot;:&quot;&quot;Maestro-ActionCenter&quot;&quot;,&quot;&quot;action&quot;&quot;:&quot;&quot;&quot; + taskAction + &quot;&quot;&quot;}&quot;]"
+                    AcceptFormat="application/json" />
+
+                  <ui:LogMessage DisplayName="Log Human Decision" Level="Info"
+                    Message="[&quot;Human decision applied: &quot; + taskAction + &quot; for &quot; + escalation(&quot;id&quot;).ToString()]" />
+
+                </Sequence>
+              </ActivityAction>
+            </ui:ForEach.Body>
+          </ui:ForEach>
+
+        </Sequence>
+      </ui:If.Then>
+      <ui:If.Else>
+        <ui:LogMessage DisplayName="No Escalations" Level="Info"
+          Message="All exceptions resolved autonomously. No human review needed." />
+      </ui:If.Else>
+    </ui:If>
+
+    <!-- ═══ STEP 6: Write Summary to Orchestrator Queue ══════════════════════════ -->
+    <ui:AddQueueItem
+      DisplayName="[6] Log Run Summary to Queue"
+      QueueName="DentalFlowAuditLog"
+      ItemInformation="[New Dictionary(Of String, Object) From {
+        {&quot;runStatus&quot;, RunStatus},
+        {&quot;resolved&quot;, ResolvedCount},
+        {&quot;escalated&quot;, EscalatedCount},
+        {&quot;timestamp&quot;, DateTime.UtcNow.ToString(&quot;o&quot;)},
+        {&quot;agentApiUrl&quot;, AgentApiUrl}
+      }]" />
+
+    <!-- ═══ STEP 7: Final Log ══════════════════════════════════════════════════ -->
+    <ui:LogMessage DisplayName="[7] Orchestration Complete" Level="Info"
+      Message="[String.Format(&quot;DentalFlow run complete. Status={0}, Resolved={1}, Escalated={2}&quot;, RunStatus, ResolvedCount, EscalatedCount)]" />
+
+  </Sequence>
+</Activity>
