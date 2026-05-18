@@ -135,15 +135,6 @@ Running the agent resolves all three in a single `--once` cycle.
 
 ---
 
-## Hackathon
-
-- **Event**: [UiPath AgentHack 2026](https://uipath-agenthack.devpost.com/)
-- **Track**: Track 1 — UiPath Maestro Case
-- **Prize pool**: $50,000
-- **Deadline**: June 30, 2026
-
----
-
 ## License
 
 MIT
