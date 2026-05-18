@@ -1,3 +1,11 @@
 # DentalFlow Agent - Python Dependencies
+
+# Core HTTP
 requests>=2.31.0
+
+# Environment variables
 python-dotenv>=1.0.0
+
+# Flask API server (for UiPath Maestro HTTP Activity integration)
+flask>=3.0.0
+gunicorn>=21.2.0
